@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyTitle>WoW Version Fix</AssemblyTitle>
+    <Product>WoW Version Fix</Product>
+    <AssemblyName>WowVersionFix</AssemblyName>
+    <Version>1.0.0</Version>
+    <RootNamespace>WowVersionFix</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\TACTTool.exe" />
+  </ItemGroup>
+
+</Project>
