@@ -1,0 +1,356 @@
+name: README links
+
+# The download links in the READMEs went stale within an hour of the process that was
+# meant to keep them fresh being written down. This checks them against the live releases
+# instead of trusting anyone to remember.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+  # Publishing a release does not push a commit, so none of the above fires when a new
+  # macos-v* ships and leaves the docs pointing at the previous one. The release event is
+  # what notices that in seconds; the cron is the backstop for everything else that can
+  # move the world while the repo stands still (a release edited or deleted by hand, an
+  # asset removed, a tag retargeted).
+  release:
+    types: [published, edited, deleted]
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  readme-links:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # A release event points at the tag's commit, which can be any age. The docs
+          # under test are the ones on the default branch.
+          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || '' }}
+
+      # gh and jq are preinstalled on the runner, so there is no third-party action here.
+      - name: Check every release link the READMEs hand out
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+
+          repo="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+          server="${GITHUB_SERVER_URL:-https://github.com}"
+          summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          work="$(mktemp -d)"
+          failures="$work/failures"
+          : > "$failures"
+
+          # Every problem is recorded and the run keeps going, so one red build lists all
+          # of them rather than sending the maintainer back for a second round.
+          fail() {
+            where="$1"
+            shift
+            if [ -n "$where" ]; then
+              echo "::error file=${where%:*},line=${where##*:}::$*"
+              printf -- '- `%s` - %s\n' "$where" "$*" >> "$failures"
+            else
+              echo "::error::$*"
+              printf -- '- %s\n' "$*" >> "$failures"
+            fi
+          }
+
+          # A 4xx is an answer, not a blip, so it comes back immediately; everything else
+          # is retried so a rate limit or a 5xx cannot turn a green check red.
+          resolve() {
+            delay=3
+            for attempt in 1 2 3 4; do
+              code="$(curl -sS -o /dev/null -w '%{http_code}' -I -L --max-time 30 "$1" 2>/dev/null || true)"
+              case "$code" in ''|*[!0-9]*) code=000 ;; esac
+              # Some asset hosts refuse HEAD; ask for one byte before believing that.
+              if [ "$code" = 405 ]; then
+                code="$(curl -sS -o /dev/null -w '%{http_code}' -L -r 0-0 --max-time 30 "$1" 2>/dev/null || true)"
+                case "$code" in ''|*[!0-9]*) code=000 ;; esac
+              fi
+              case "$code" in
+                2??) printf '%s' "$code"; return 0 ;;
+                000|408|425|429|5??) ;;
+                *) printf '%s' "$code"; return 1 ;;
+              esac
+              [ "$attempt" = 4 ] && break
+              sleep "$delay"
+              delay=$((delay * 2))
+            done
+            printf '%s' "$code"
+            return 1
+          }
+
+          # stdout and stderr are kept apart: a warning printed alongside good JSON used to
+          # be captured as part of it, and the payload then parsed as "no releases exist".
+          gh_api() {
+            delay=3
+            for attempt in 1 2 3 4; do
+              if out="$(gh api "$@" 2>"$work/gh-stderr")"; then
+                printf '%s' "$out"
+                return 0
+              fi
+              err="$(cat "$work/gh-stderr")"
+              case "$err" in
+                *"rate limit"*|*"abuse"*|*"502"*|*"503"*|*"504"*|*"timeout"*|*"EOF"*|*"connection"*) ;;
+                *) break ;;
+              esac
+              [ "$attempt" = 4 ] && break
+              sleep "$delay"
+              delay=$((delay * 2))
+            done
+            printf '%s\n' "${err:-gh api failed}" >&2
+            return 1
+          }
+
+          # Fenced blocks and HTML comments are dropped, but their lines are kept blank so
+          # annotations still land on the right line. Nothing clickable lives in either in
+          # these READMEs, while both are exactly where someone leaves an illustrative or
+          # superseded .../download/<tag>/<asset> URL, which would 404 forever. An
+          # unterminated one blanks the rest of the file and would hide a genuinely stale
+          # link, so it is reported rather than silently obeyed. Indented blocks are left
+          # in deliberately: four-space indentation is also how a list continuation is
+          # written, and those do hold live links.
+          strip_uncheckable() {
+            awk '
+              /^[[:space:]]*(```|~~~)/ { fenced = !fenced; print ""; next }
+              fenced { print ""; next }
+              {
+                line = $0
+                while (1) {
+                  if (commented) {
+                    i = index(line, "-->")
+                    if (i == 0) { line = ""; break }
+                    commented = 0
+                    line = substr(line, i + 3)
+                  } else {
+                    i = index(line, "<!--")
+                    if (i == 0) break
+                    commented = 1
+                    rest = substr(line, i + 4)
+                    j = index(rest, "-->")
+                    if (j == 0) { line = substr(line, 1, i - 1); break }
+                    commented = 0
+                    line = substr(line, 1, i - 1) substr(rest, j + 3)
+                  }
+                }
+                print line
+              }
+              END { if (fenced) exit 3; if (commented) exit 4 }
+            ' "$1"
+          }
+
+          git ls-files '*README.md' 'README.md' > "$work/readmes"
+          [ -s "$work/readmes" ] || fail "" "no README.md is tracked - the scan had nothing to check"
+
+          # The link list is whatever the READMEs actually say, never a list kept here.
+          url_prefix="$(printf '%s/%s/' "$server" "$repo" | sed 's/[][\.^$*+?(){}|\\/]/\\&/g')"
+          hits="$work/hits"
+          pinned="$work/pinned"
+          : > "$hits"
+          : > "$pinned"
+
+          while IFS= read -r readme; do
+            strip_uncheckable "$readme" > "$work/stripped"
+            case "$?" in
+              3) fail "$readme:1" "unterminated code fence - the link scan skipped everything after it" ;;
+              4) fail "$readme:1" "unterminated HTML comment - the link scan skipped everything after it" ;;
+            esac
+
+            grep -nEo "${url_prefix}(releases|tags)[^])>\"'\`*|[:space:]]*" "$work/stripped" |
+              sed 's/[.,;:!?]*$//' |
+              while IFS=: read -r line url; do
+                printf '%s\t%s\t%s\n' "$readme" "$line" "$url"
+              done >> "$hits"
+
+            # A version named in prose next to a link rots exactly like the link does, and
+            # nothing in the URL checks below would ever see it.
+            grep -nEo '[A-Za-z][A-Za-z0-9_]*-v[0-9][0-9A-Za-z.]*' "$work/stripped" |
+              sed 's/\.*$//' |
+              while IFS=: read -r line tag; do
+                printf '%s\t%s\t%s\n' "$readme" "$line" "$tag"
+              done >> "$pinned"
+          done < "$work/readmes"
+
+          count="$(wc -l < "$hits" | tr -d ' ')"
+          echo "== $(wc -l < "$work/readmes" | tr -d ' ') README(s), $count release/tag link(s) outside fenced blocks"
+          echo
+
+          # (a) every release URL a README hands a user has to actually resolve.
+          cache="$work/cache"
+          : > "$cache"
+          while IFS="$(printf '\t')" read -r readme line url; do
+            [ -n "${url:-}" ] || continue
+            code="$(awk -F'\t' -v u="$url" '$1 == u { print $2; exit }' "$cache")"
+            if [ -z "$code" ]; then
+              code="$(resolve "$url")" || true
+              printf '%s\t%s\n' "$url" "$code" >> "$cache"
+            fi
+            case "$code" in
+              2??) printf '  ok   %s  %s\n' "$code" "$url" ;;
+              *)   printf '  FAIL %s  %s\n' "$code" "$url"
+                   fail "$readme:$line" "$url does not resolve (HTTP $code)" ;;
+            esac
+          done < "$hits"
+          echo
+
+          # A missing or malformed payload has to mean "not checked", never "the release
+          # does not exist" - the second reads as fact in an annotation and would send a
+          # maintainer off to break a link that works.
+          api_ok=1
+          releases="$(gh_api --paginate --slurp "repos/$repo/releases")" || api_ok=0
+          if [ "$api_ok" = 1 ]; then
+            releases="$(printf '%s' "$releases" | jq '[.[][]] | map(select((.draft | not) and (.prerelease | not)))' 2>/dev/null)" || api_ok=0
+            printf '%s' "$releases" | jq -e 'type == "array"' >/dev/null 2>&1 || api_ok=0
+          fi
+          [ "$api_ok" = 1 ] || fail "" "could not list the releases of $repo - the tag checks were skipped, not passed"
+
+          latest_ok=0
+          latest_tag=""
+          latest_assets=""
+          if [ "$api_ok" = 1 ] && latest_json="$(gh_api "repos/$repo/releases/latest")" &&
+             printf '%s' "$latest_json" | jq -e '.tag_name' >/dev/null 2>&1; then
+            latest_ok=1
+            latest_tag="$(printf '%s' "$latest_json" | jq -r '.tag_name')"
+            latest_assets="$(printf '%s' "$latest_json" | jq -r '.assets[].name')"
+          elif [ "$api_ok" = 1 ]; then
+            fail "" "could not read the Latest release of $repo - the Latest-marker checks were skipped, not passed"
+          fi
+
+          newest_for() {
+            printf '%s' "$releases" |
+              jq -r --arg p "$1" 'map(select(.tag_name | startswith($p + "-v")))
+                | sort_by(.published_at) | reverse | .[0].tag_name // ""'
+          }
+
+          awk -F'\t' '{
+            if (match($3, /\/releases\/(download|tag)\/[^\/]+/)) {
+              n = split(substr($3, RSTART, RLENGTH), part, "/")
+              print $1 "\t" $2 "\t" part[n]
+            }
+          }' "$hits" >> "$pinned"
+          sort -u "$pinned" -o "$pinned"
+
+          # Every asset name the READMEs ask /releases/latest/download/ for. Its presence
+          # is also what makes a series self-maintaining, which check (d) leans on.
+          latest_prefix="$server/$repo/releases/latest/download/"
+          readme_assets="$(awk -F'\t' -v p="$latest_prefix" '
+            index($3, p) == 1 { print substr($3, length(p) + 1) }' "$hits" | sort -u)"
+
+          # (b) a <series>-v* tag a README names - in a link or in the sentence beside it -
+          # has to BE that series' newest release. "Newest" is read from the API on every
+          # run, so no literal version can satisfy this by being written down confidently.
+          if [ "$api_ok" = 1 ]; then
+            while IFS="$(printf '\t')" read -r readme line tag; do
+              [ -n "${tag:-}" ] || continue
+              case "$tag" in
+                *-v[0-9]*) series="${tag%%-v[0-9]*}" ;;
+                *) printf '  ok   %s is unprefixed (predates the split) - resolution checked, series check n/a\n' "$tag"
+                   continue ;;
+              esac
+              newest="$(newest_for "$series")"
+              if [ -z "$newest" ]; then
+                fail "$readme:$line" "names $tag but no published $series-v* release exists"
+              elif [ "$newest" != "$tag" ]; then
+                fail "$readme:$line" "names $tag but the newest $series-v* release is $newest - update this"
+              else
+                printf '  ok   %s is the newest %s-v* release\n' "$tag" "$series"
+              fi
+            done < "$pinned"
+          else
+            echo "  skip  tag freshness (releases API unavailable)"
+          fi
+          echo
+
+          # (c) the repo's Latest marker still belongs to the Windows app. Windows releases
+          # are published with --latest and macOS ones with --latest=false, which is what
+          # makes /releases/latest/download/<exe> self-maintaining - and what silently
+          # breaks every Windows download link if a macOS release ever takes the marker.
+          # The asset name comes from the csproj the release workflow builds, as there.
+          project="$(git ls-files '*.csproj' | head -1)"
+          if [ -z "$project" ]; then
+            fail "" "no .csproj is tracked - cannot derive the Windows asset name"
+          else
+            asset="$(sed -n '/<AssemblyName>/{s:.*<AssemblyName>\([^<]*\)</AssemblyName>.*:\1:p;q;}' "$project" | tr -d '\r')"
+            [ -n "$asset" ] || asset="$(basename "$project" .csproj)"
+            asset="$asset.exe"
+
+            # Renaming the assembly moves the asset name on the next release only. The
+            # READMEs keep asking for the old one, and nothing else here would notice.
+            if [ -n "$readme_assets" ] && ! printf '%s\n' "$readme_assets" | grep -qxF "$asset"; then
+              fail "" "the READMEs ask /releases/latest/download/ for $(printf '%s\n' "$readme_assets" | tr '\n' ' ')but $project builds $asset"
+            fi
+
+            # Whether the Latest release still serves what the READMEs link is a different
+            # question from whether it serves what the csproj builds, and a rename answers
+            # only the second. Saying "the marker moved" for either one would be a
+            # confident wrong diagnosis, so the remedy is only offered when the marker is
+            # in fact what is broken.
+            served=0
+            if [ -n "$readme_assets" ] && [ -n "$latest_assets" ] &&
+               printf '%s\n' "$readme_assets" | grep -qxF -f <(printf '%s\n' "$latest_assets"); then
+              served=1
+            fi
+
+            latest_url="$server/$repo/releases/latest/download/$asset"
+            code="$(resolve "$latest_url")" || true
+            case "$code" in
+              2??) printf '  ok   %s  %s  (Latest = %s)\n' "$code" "$latest_url" "${latest_tag:-unknown}" ;;
+              *)   if [ "$latest_ok" != 1 ]; then
+                     fail "" "$latest_url does not resolve (HTTP $code)"
+                   elif [ "$served" = 1 ]; then
+                     fail "" "the Latest release $latest_tag carries $(printf '%s\n' "$latest_assets" | tr '\n' ' ')- not $asset, the name $project builds, so the next windows-v* release will move the READMEs' link out from under them"
+                   else
+                     fail "" "the Latest release $latest_tag carries $(printf '%s\n' "$latest_assets" | tr '\n' ' ')- not $asset, so every Windows download link is dead; publish Windows releases with --latest and macOS ones with --latest=false"
+                   fi ;;
+            esac
+          fi
+          echo
+
+          # (d) A release nobody links to is the other half of the same rot: the old link
+          # still resolves, so (a) and (b) both stay green while the docs describe a build
+          # that has been shipped over. A series whose newest release holds the Latest
+          # marker is exempt while a README asks /releases/latest/download/ for an asset:
+          # that link follows the marker by itself, so there is no pin to go stale and
+          # demanding one would undo the reason it is written that way.
+          if [ "$api_ok" = 1 ] && [ "$latest_ok" = 1 ]; then
+            for series in $(printf '%s' "$releases" | jq -r '.[].tag_name | select(test("^.+-v[0-9]")) | sub("-v[0-9].*$"; "")' | sort -u); do
+              newest="$(newest_for "$series")"
+              if grep -q -e "/$newest/" -e "/$newest\$" "$hits"; then
+                printf '  ok   %s is linked from a README\n' "$newest"
+              elif [ "$newest" = "$latest_tag" ] && [ -n "$readme_assets" ]; then
+                printf '  ok   %s holds the Latest marker and a README links /releases/latest/download/ - nothing to pin\n' "$newest"
+              else
+                fail "" "$newest is the newest $series-v* release and no README links to it"
+              fi
+            done
+          else
+            echo "  skip  release coverage (releases API unavailable)"
+          fi
+          echo
+
+          {
+            echo "### README release links"
+            echo
+            echo "\`$repo\` - $count link(s) checked."
+          } >> "$summary"
+
+          if [ -s "$failures" ]; then
+            total="$(wc -l < "$failures" | tr -d ' ')"
+            echo "== $total problem(s)"
+            cat "$failures"
+            { echo; echo "**$total problem(s):**"; echo; cat "$failures"; } >> "$summary"
+            echo "::error::README release links are stale - $total problem(s), listed in the annotations above"
+            exit 1
+          fi
+
+          echo "== every README release link resolves and points at the newest release of its series"
+          { echo; echo "Every link resolves and points at the newest release of its series."; } >> "$summary"
