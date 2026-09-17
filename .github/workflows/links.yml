@@ -169,7 +169,7 @@ jobs:
               sed 's/[.,;:!?]*$//' |
               while IFS=: read -r line url; do
                 printf '%s\t%s\t%s\n' "$readme" "$line" "$url"
-              done >> "$hits"
+              done >> "$hits" || true
 
             # A version named in prose next to a link rots exactly like the link does, and
             # nothing in the URL checks below would ever see it.
@@ -177,7 +177,7 @@ jobs:
               sed 's/\.*$//' |
               while IFS=: read -r line tag; do
                 printf '%s\t%s\t%s\n' "$readme" "$line" "$tag"
-              done >> "$pinned"
+              done >> "$pinned" || true
           done < "$work/readmes"
 
           count="$(wc -l < "$hits" | tr -d ' ')"
