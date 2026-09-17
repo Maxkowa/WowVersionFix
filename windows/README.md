@@ -8,13 +8,15 @@ No install. No setup. Double-click and go.
 
 ## Download
 
-> **[⬇ Download WowVersionFix.exe](https://github.com/Maxkowa/WowVersionFix/releases/download/v1.0.0/WowVersionFix.exe)** — `v1.0.0`, the newest Windows build.
+> **[⬇ Download WowVersionFix.exe](https://github.com/Maxkowa/WowVersionFix/releases/latest/download/WowVersionFix.exe)** — always the newest Windows build.
 
 Windows 10/11 x64. ~75 MB (self-contained — no .NET install needed).
 
-`v1.0.0` predates the two-app split; Windows builds from here on are tagged `windows-v*`. Every tag is listed at [/tags](https://github.com/Maxkowa/WowVersionFix/tags) — if a `windows-v*` tag is there and this link still says `v1.0.0`, the tag is newer.
+`v1.0.0` predates the two-app split; Windows builds from here on are tagged `windows-v*`. The link needs no editing when one ships: Windows releases are published as the repo's **Latest**, so it follows them. Every tag is listed at [/tags](https://github.com/Maxkowa/WowVersionFix/tags).
 
-Don't use `/releases/latest`, and don't trust `/releases?q=windows`: this repo also ships a macOS app, and `q=` is a full-text search over release notes, not a tag filter. A tagged link is the only one that can't hand you the wrong platform's binary.
+Two different things are called `/releases/latest`, and only one of them is useful. The **page** is pinned to the Windows app, so it is no help to a Mac user and tells you nothing a tag doesn't. The asset-scoped `/releases/latest/download/WowVersionFix.exe` **URL** is the one above: the asset name is part of the request, so it can never hand you the macOS `.zip`. Its one failure mode is a dead link — if a macOS release ever took the **Latest** marker, it would 404 rather than serve the wrong app, and CI watches for exactly that.
+
+Don't trust `/releases?q=windows` though: this repo also ships a macOS app, and `q=` is a full-text search over release notes, not a tag filter.
 
 On first launch, Windows SmartScreen may warn that the app is unrecognized (it's unsigned). Click **More info → Run anyway**.
 
@@ -60,7 +62,7 @@ The build has no `<Version>`: a local publish gets MSBuild's default, and CI pas
 
 Pushing a `windows-v*` tag triggers a CI build on a Windows runner that runs the publish command above and attaches the resulting `WowVersionFix.exe` to a release for that tag. `macos-v*` tags are the macOS app and build nothing here.
 
-Windows releases are marked as the repo's **Latest**; macOS ones explicitly are not, so `/releases/latest` always resolves to a Windows `.exe`.
+Windows releases are marked as the repo's **Latest**; macOS ones explicitly are not, so the asset-scoped `/releases/latest/download/WowVersionFix.exe` always resolves to the newest Windows `.exe`.
 
 Every push to `main` and every pull request builds both apps without releasing anything, so a tag only ever runs code that already compiled.
 

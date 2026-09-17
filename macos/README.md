@@ -8,11 +8,11 @@ Pick a flavor, pick a build, click **Switch**.
 
 ## Download
 
-**There is no macOS release yet.** The first one lands when `macos-v1.0.0` is tagged; until then, [build from source](#build-from-source) — it takes one command.
+> **[⬇ Download WoW-Build-Switcher-macos.zip](https://github.com/Maxkowa/WowVersionFix/releases/download/macos-v1.0.1/WoW-Build-Switcher-macos.zip)** — `macos-v1.0.1`, the newest macOS build.
 
-Once it exists it will be a zipped, universal binary (Apple Silicon and Intel), macOS 14 or later: unzip and drag **WoW Build Switcher.app** to `/Applications`. Check [/tags](https://github.com/Maxkowa/WowVersionFix/tags) for a `macos-v*` tag, and grab the `.zip` from that tag's release page.
+macOS 14 or later, universal (Apple Silicon and Intel). Unzip and drag **WoW Build Switcher.app** to `/Applications`. Prefer to compile it yourself? [Build from source](#build-from-source) — it takes one command.
 
-Don't use `/releases/latest` — it is pinned to the Windows app, so it will hand you an `.exe`. Don't use `/releases?q=macos` either: `q=` is a full-text search over release notes, so it can match a Windows release whose changelog happens to mention macOS.
+That link is pinned to a tag on purpose. The **Latest** marker on this repo belongs to the Windows app (macOS releases are published with `--latest=false`), so the `/releases/latest` **page** never shows a macOS build, and the asset-scoped `/releases/latest/download/WoW-Build-Switcher-macos.zip` **URL** 404s by design — which is the point: it can hand you a dead link, never an `.exe`. Every tag is listed at [/tags](https://github.com/Maxkowa/WowVersionFix/tags); if a `macos-v*` tag there is newer than the one above, grab the `.zip` from its release page. Don't use `/releases?q=macos`: `q=` is a full-text search over release notes, so it can match a Windows release whose changelog happens to mention macOS.
 
 The app is ad-hoc signed, so macOS blocks a downloaded copy on first launch. Open it once, then go to **System Settings → Privacy & Security**, find the message about *WoW Build Switcher* and click **Open Anyway**. (On macOS 14 you can right-click → **Open** instead; Apple removed that shortcut in macOS 15.) A copy you built yourself is not quarantined and just opens.
 
@@ -123,7 +123,7 @@ The app runs `~/wow-build-fetch/wowbuild.py` when it is present and the bundled 
 
 Pushing a `macos-v*` tag triggers a CI build on a macOS runner that produces the universal app bundle and attaches it, zipped, to a release for that tag. `windows-v*` tags are the Windows app and build nothing here.
 
-CI passes the tag's version to `build.sh` as `BUNDLE_VERSION`, so a released bundle reports the version it was tagged with; a local build keeps whatever `Info.plist` says. macOS releases are explicitly *not* marked as the repo's **Latest** — that stays with the Windows app, so `/releases/latest` never serves a `.app`.
+CI passes the tag's version to `build.sh` as `BUNDLE_VERSION`, so a released bundle reports the version it was tagged with; a local build keeps whatever `Info.plist` says. macOS releases are explicitly *not* marked as the repo's **Latest** — that stays with the Windows app, so neither the `/releases/latest` page nor `/releases/latest/download/` ever serves a `.app`.
 
 Every push to `main` and every pull request builds both apps without releasing anything, so a tag only ever runs code that already compiled.
 
