@@ -85,9 +85,91 @@ def parse_psv(text):
     return rows
 
 
+def parse_tags(text):
+    return {t.rstrip("?") for g in text.split(":") for t in g.split()}
+
+
+def pb_varint(buf, i):
+    r = s = 0
+    while True:
+        b = buf[i]
+        r |= (b & 0x7F) << s
+        i += 1
+        if not b & 0x80:
+            return r, i
+        s += 7
+
+
+def pb_fields(buf):
+    i = 0
+    while i < len(buf):
+        try:
+            tag, i = pb_varint(buf, i)
+            wt = tag & 7
+            if wt == 0:
+                v, i = pb_varint(buf, i)
+            elif wt == 2:
+                n, i = pb_varint(buf, i)
+                v, i = buf[i:i + n], i + n
+                if len(v) < n:
+                    return
+            elif wt in (1, 5):
+                n = 8 if wt == 1 else 4
+                v, i = buf[i:i + n], i + n
+                if len(v) < n:
+                    return
+            else:
+                return
+        except IndexError:
+            return
+        yield tag >> 3, wt, v
+
+
+def pb_get(buf, *path):
+    for fn in path:
+        buf = next((v for f, wt, v in pb_fields(buf) if f == fn and wt == 2), None)
+        if buf is None:
+            return ""
+    return buf.decode("utf-8", "replace")
+
+
+def product_db(game_dir):
+    """Battle.net's own install database, and the only local source for products that
+    .build.info no longer lists. It is schemaless protobuf, so pb_fields walks the wire
+    format by field number and never raises: a truncated field or an unknown wire type
+    ends that message, costing one skipped record rather than the whole tool. Paths into
+    a ProductInstall record are 2 product code, 3.1 install path, 3.2 region, 4.1.7
+    version, 4.1.12 build config (absent on some products, 4.1.14 carries it then) and
+    4.1.17 tags. Battle.net writes the records either as a repeated field 1 or, for a
+    single product, as one bare record at the top level, so raw is tried as a record too:
+    a repeated-field file has no top-level field 2 and contributes nothing that way."""
+    try:
+        raw = open(os.path.join(game_dir, ".product.db"), "rb").read()
+    except OSError:
+        return {}
+    out = {}
+    for rec in [r for fn, wt, r in pb_fields(raw) if fn == 1 and wt == 2] + [raw]:
+        code = pb_get(rec, 2)
+        version = pb_get(rec, 4, 1, 7)
+        region = pb_get(rec, 3, 2)
+        path = pb_get(rec, 3, 1)
+        if not (code and version and region):
+            continue
+        try:
+            if path and not os.path.samefile(path, game_dir):
+                continue
+        except OSError:
+            continue
+        out[code] = {"region": region, "version": version,
+                     "build_config": pb_get(rec, 4, 1, 12) or pb_get(rec, 4, 1, 14),
+                     "tags": pb_get(rec, 4, 1, 17)}
+    return out
+
+
 def find_game_dir(override=None):
     for d in ([override] if override else GAME_DIRS):
-        if d and os.path.exists(os.path.join(d, ".build.info")):
+        if d and any(os.path.exists(os.path.join(d, n))
+                     for n in (".build.info", ".product.db")):
             return d
     die("no WoW install found; pass --game-dir")
 
@@ -105,23 +187,73 @@ def flavors(game_dir):
 
 def branches(game_dir):
     out = {}
-    for r in parse_psv(open(os.path.join(game_dir, ".build.info")).read()):
+    try:
+        info = open(os.path.join(game_dir, ".build.info")).read()
+    except OSError:
+        info = ""
+    for r in parse_psv(info):
         if r.get("Active") != "1":
             continue
-        tags = {t.rstrip("?") for g in r.get("Tags", "").split(":") for t in g.split()}
         out[r["Product"]] = {
+            "product": r["Product"],
             "region": r.get("Branch", "us").upper(),
             "version": r.get("Version", ""),
             "build_config": r.get("Build Key", ""),
             "cdn_config": r.get("CDN Key", ""),
             "cdn_path": r.get("CDN Path", "tpr/wow"),
             "hosts": r.get("CDN Hosts", "level3.blizzard.com").split(),
-            "tags": tags,
+            "tags": parse_tags(r.get("Tags", "")),
+        }
+    for product, p in product_db(game_dir).items():
+        if product in out:
+            continue
+        out[product] = {
+            "product": product,
+            "region": p["region"].upper(),
+            "version": p["version"],
+            "build_config": p["build_config"],
+            "cdn_config": "",
+            "cdn_path": "",
+            "hosts": [],
+            "tags": parse_tags(p["tags"]),
         }
     return out
 
 
+CDN_RESOLVED = {}
+
+
+def cdn_ready(branch):
+    if branch["cdn_path"] and branch["hosts"]:
+        return branch
+    product, region = branch["product"], branch["region"].lower()
+    if not region:
+        die(f"{product}: no region recorded for this install")
+    if (product, region) not in CDN_RESOLVED:
+        base = f"https://{region}.version.battle.net/v2/products/{product}"
+        try:
+            cdns = parse_psv(http(f"{base}/cdns").decode())
+            vers = parse_psv(http(f"{base}/versions").decode())
+        except Exception as e:
+            die(f"{product}: CDN hosts unknown and {base} is unreachable ({e})")
+        usable = [r for r in cdns if r.get("Path") and r.get("Hosts")]
+        cdn = next((r for r in usable if r.get("Name") == region),
+                   usable[0] if usable else None)
+        if not cdn:
+            die(f"{product}: {base}/cdns lists no usable CDN for region {region}")
+        CDN_RESOLVED[(product, region)] = (cdn, next(
+            (r for r in vers if r.get("Region") == region), None))
+    cdn, ver = CDN_RESOLVED[(product, region)]
+    branch["cdn_path"] = branch["cdn_path"] or cdn["Path"]
+    branch["hosts"] = branch["hosts"] or cdn["Hosts"].split()
+    if ver and ver.get("VersionsName") == branch["version"]:
+        branch["build_config"] = branch["build_config"] or ver.get("BuildConfig", "")
+        branch["cdn_config"] = branch["cdn_config"] or ver.get("CDNConfig", "")
+    return branch
+
+
 def cdn_get(branch, key, kind="data", suffix="", dest=None, rng=None):
+    cdn_ready(branch)
     last = None
     for host in branch["hosts"]:
         url = f"http://{host}/{branch['cdn_path']}/{kind}/{key[0:2]}/{key[2:4]}/{key}{suffix}"
@@ -131,7 +263,9 @@ def cdn_get(branch, key, kind="data", suffix="", dest=None, rng=None):
             last = e
             if e.code not in (403, 404):
                 raise
-    raise last
+    if last:
+        raise last
+    die(f"{branch['product']}: no CDN host served {key}")
 
 
 def parse_install(buf):
@@ -241,35 +375,45 @@ def live_versions(product, region):
     """Blizzard's own version endpoint - authoritative, and ahead of third-party lists."""
     try:
         txt = http(f"https://{region.lower()}.version.battle.net/v2/products/{product}/versions").decode()
+        return [{"version": r.get("VersionsName", ""), "build_config": r.get("BuildConfig", ""),
+                 "cdn_config": r.get("CDNConfig", ""), "created_at": "(live)",
+                 "region": r.get("Region", "")} for r in parse_psv(txt)]
     except Exception:
         return []
-    return [{"version": r["VersionsName"], "build_config": r["BuildConfig"],
-             "cdn_config": r["CDNConfig"], "created_at": "(live)", "region": r["Region"]}
-            for r in parse_psv(txt)]
 
 
 def wago_builds(product):
     try:
-        return json.loads(http("https://wago.tools/api/builds").decode()).get(product, [])
+        rows = json.loads(http("https://wago.tools/api/builds").decode()).get(product, [])
+        return [{"version": r.get("version", ""), "build_config": r.get("build_config", ""),
+                 "cdn_config": r.get("cdn_config", ""), "created_at": r.get("created_at", "")}
+                for r in rows]
     except Exception:
         return []
 
 
 def known_builds(product, branch):
-    """Merge the live build, the installed build, and wago.tools history."""
+    """Merge the live build, the installed build, and wago.tools history. The installed
+    build keeps its place near the top but borrows any hash the local files did not have,
+    and an entry missing either hash is dropped: nothing is listed that cannot be fetched."""
     seen, out = set(), []
     region = branch["region"].lower()
-    for b in live_versions(product, region):
-        if b["region"] == region and b["version"] not in seen:
+    installed = {"version": branch["version"], "build_config": branch["build_config"],
+                 "cdn_config": branch["cdn_config"], "created_at": "(installed)"}
+    live = live_versions(product, region)
+    mine = [b for b in live if b["region"] == region]
+    for b in (mine or live):
+        if b["version"] and b["version"] not in seen:
             seen.add(b["version"]); out.append(b)
-    if branch["version"] and branch["version"] not in seen:
-        seen.add(branch["version"])
-        out.append({"version": branch["version"], "build_config": branch["build_config"],
-                    "cdn_config": branch["cdn_config"], "created_at": "(installed)"})
+    if installed["version"] and installed["version"] not in seen:
+        seen.add(installed["version"]); out.append(installed)
     for b in wago_builds(product):
-        if b["version"] not in seen:
+        if b["version"] == installed["version"]:
+            installed["build_config"] = installed["build_config"] or b["build_config"]
+            installed["cdn_config"] = installed["cdn_config"] or b["cdn_config"]
+        if b["version"] and b["version"] not in seen:
             seen.add(b["version"]); out.append(b)
-    return out
+    return [b for b in out if b["build_config"] and b["cdn_config"]]
 
 
 def app_version(app):
