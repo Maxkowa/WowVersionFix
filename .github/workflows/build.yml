@@ -1,0 +1,85 @@
+name: Build
+
+# Proves both apps still compile before anyone cuts a tag. The release workflows only
+# ever run on a tag that is already public, and the Windows app cannot be built on the
+# maintainer's machine at all, so without this the first compile happens too late.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      PROJECT: windows/WowVersionFix.csproj
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Same command the release workflow and windows/README.md both use.
+      - name: Publish self-contained single file
+        run: |
+          dotnet publish "$PROJECT" -c Release -r win-x64 \
+            --self-contained true -p:PublishSingleFile=true
+
+      - name: Check the exe landed where the release workflow looks for it
+        run: |
+          name="$(sed -n '/<AssemblyName>/{s:.*<AssemblyName>\([^<]*\)</AssemblyName>.*:\1:p;q;}' "$PROJECT")"
+          [ -n "$name" ] || name="$(basename "$PROJECT" .csproj)"
+          found="$(find "$(dirname "$PROJECT")/bin" -type f -path '*/publish/*' -name "$name.exe" | head -1)"
+          [ -n "$found" ] || { echo "::error::no $name.exe under a publish/ directory"; exit 1; }
+          ls -l "$found"
+
+  macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      APP_DIR: macos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same universal build the release workflow ships, so a broken swiftc invocation
+      # or a missing Intel slice shows up here rather than on a public tag.
+      - name: Build the universal app
+        env:
+          ARCHS: arm64 x86_64
+        run: "$APP_DIR/build.sh"
+
+      - name: Verify architectures and signature
+        run: |
+          app="$APP_DIR/build/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_DIR/Info.plist").app"
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          binary="$app/Contents/MacOS/$executable"
+
+          lipo -info "$binary"
+          archs="$(lipo -archs "$binary")"
+          for want in arm64 x86_64; do
+            case " $archs " in
+              *" $want "*) ;;
+              *)
+                echo "::error::$binary has no $want slice (found: $archs)"
+                exit 1
+                ;;
+            esac
+          done
+
+          codesign --verify --deep --strict --verbose=2 "$app"

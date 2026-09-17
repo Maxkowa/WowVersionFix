@@ -1,0 +1,176 @@
+name: Release macOS
+
+# Ships macos/ only. The Windows app has its own tag prefix and its own workflow,
+# so the two apps never end up in the same release.
+on:
+  push:
+    tags:
+      - 'macos-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing macos-v* tag to build and release (defaults to the ref this run was started from)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  APP_DIR: macos
+  ASSET_NAME: WoW-Build-Switcher-macos.zip
+
+jobs:
+  release:
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      # The tag is the only source of the version - nothing below hardcodes one.
+      - name: Resolve tag
+        id: tag
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          tag="${TAG_INPUT:-$GITHUB_REF_NAME}"
+          case "$tag" in
+            macos-v*) ;;
+            *)
+              echo "::error::'$tag' is not a macos-v* tag - this workflow only releases the macOS app"
+              exit 1
+              ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#macos-v}" >> "$GITHUB_OUTPUT"
+
+      # Full history so the previous macos-v* tag can be found for the changelog.
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      # The runner is Apple Silicon, so a host-arch build would not run on Intel Macs.
+      # ARCHS makes build.sh emit a universal binary; the deployment target comes from
+      # Info.plist, which build.sh reads for itself.
+      - name: Build the universal app
+        env:
+          ARCHS: arm64 x86_64
+          BUNDLE_VERSION: ${{ steps.tag.outputs.version }}
+          BUNDLE_BUILD: ${{ github.run_number }}
+        run: "$APP_DIR/build.sh"
+
+      - name: Locate the built app
+        id: app
+        run: |
+          app=""
+          for candidate in "$APP_DIR"/build/*.app; do
+            [ -d "$candidate" ] || continue
+            if [ -n "$app" ]; then
+              echo "::error::more than one .app in $APP_DIR/build - cannot tell which one to release"
+              exit 1
+            fi
+            app="$candidate"
+          done
+
+          if [ -z "$app" ]; then
+            echo "::error::build.sh produced no .app in $APP_DIR/build"
+            exit 1
+          fi
+
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          binary="$app/Contents/MacOS/$executable"
+          [ -f "$binary" ] || { echo "::error::$binary is missing from the bundle"; exit 1; }
+
+          echo "path=$app" >> "$GITHUB_OUTPUT"
+          echo "binary=$binary" >> "$GITHUB_OUTPUT"
+
+      # A public download has to run on both Apple Silicon and Intel, and Gatekeeper
+      # rejects a bundle whose ad-hoc signature broke while the slices were merged.
+      # The version is checked too, since the stamp happens before signing.
+      - name: Verify architectures, version and signature
+        env:
+          APP: ${{ steps.app.outputs.path }}
+          BINARY: ${{ steps.app.outputs.binary }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          lipo -info "$BINARY"
+          archs="$(lipo -archs "$BINARY")"
+          for want in arm64 x86_64; do
+            case " $archs " in
+              *" $want "*) ;;
+              *)
+                echo "::error::$BINARY has no $want slice (found: $archs) - build.sh did not honour ARCHS"
+                exit 1
+                ;;
+            esac
+          done
+
+          stamped="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          if [ "$stamped" != "$VERSION" ]; then
+            echo "::error::bundle reports version $stamped but the tag says $VERSION"
+            exit 1
+          fi
+
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      # ditto preserves bundle metadata and the signature; plain zip does not.
+      - name: Package the app
+        id: zip
+        env:
+          APP: ${{ steps.app.outputs.path }}
+        run: |
+          zip="$RUNNER_TEMP/$ASSET_NAME"
+          rm -f "$zip"
+          ditto -c -k --keepParent "$APP" "$zip"
+          ls -l "$zip"
+          echo "path=$zip" >> "$GITHUB_OUTPUT"
+
+      # gh is preinstalled on the runner, so there is no third-party action to trust.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          ASSET_PATH: ${{ steps.zip.outputs.path }}
+        run: |
+          title="WoW Build Switcher v$VERSION (macOS)"
+          notes="**WoW Build Switcher v$VERSION** - the macOS app. Universal (Apple Silicon and Intel).
+
+          Download: [$ASSET_NAME]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG/$ASSET_NAME)
+
+          The app is ad-hoc signed, so macOS blocks it on first launch. Open it once, then go to **System Settings -> Privacy & Security** and click **Open Anyway** next to the message about WoW Build Switcher. (On macOS 14, right-click the app and choose **Open** instead.)
+
+          Usage: [$APP_DIR/README.md]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$TAG/$APP_DIR/README.md)"
+
+          # Without a start tag the changelog runs from whatever released last, which
+          # would be the Windows app half the time. Pin it to the previous macOS tag.
+          prev="$(git tag --list 'macos-v*' --sort=-v:refname | awk -v t="$TAG" 'f {print; exit} $0 == t {f = 1}')"
+          start=()
+          [ -z "$prev" ] || start=(--notes-start-tag "$prev")
+
+          # Windows owns the repo's "Latest" marker, so a macOS release must never take
+          # it - otherwise /releases/latest hands Windows users a .app bundle.
+          # Create first and fall back on an explicit already_exists, so a 5xx or a rate
+          # limit fails loudly instead of being mistaken for "no release yet".
+          if out="$(gh release create "$TAG" "$ASSET_PATH" \
+               --title "$title" \
+               --notes "$notes" \
+               --generate-notes "${start[@]}" \
+               --latest=false \
+               --verify-tag 2>&1)"; then
+            printf '%s\n' "$out"
+            exit 0
+          fi
+
+          printf '%s\n' "$out" >&2
+          case "$out" in *already_exists*) ;; *) exit 1 ;; esac
+
+          # Re-run of a tag whose release already exists: refresh the asset AND the
+          # metadata, so a bad first run's title/notes do not stick forever.
+
+          gh release upload "$TAG" "$ASSET_PATH" --clobber
+          gh release edit "$TAG" --title "$title" --notes "$notes" --latest=false

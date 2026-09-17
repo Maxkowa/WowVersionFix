@@ -1,0 +1,138 @@
+name: Release Windows
+
+# Ships windows/ only. The macOS app has its own tag prefix and its own workflow,
+# so the two apps never end up in the same release.
+on:
+  push:
+    tags:
+      - 'windows-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing windows-v* tag to build and release (defaults to the ref this run was started from)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  PROJECT: windows/WowVersionFix.csproj
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      # The tag is the only source of the version - nothing below hardcodes one.
+      - name: Resolve tag
+        id: tag
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          tag="${TAG_INPUT:-$GITHUB_REF_NAME}"
+          case "$tag" in
+            windows-v*) ;;
+            *)
+              echo "::error::'$tag' is not a windows-v* tag - this workflow only releases the Windows app"
+              exit 1
+              ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#windows-v}" >> "$GITHUB_OUTPUT"
+
+      # Full history so the previous windows-v* tag can be found for the changelog.
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish self-contained single file
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          dotnet publish "$PROJECT" -c Release -r win-x64 \
+            --self-contained true -p:PublishSingleFile=true \
+            -p:Version="$VERSION"
+
+      # Publish lands in <project dir>/bin/<config>/<tfm>/<rid>/publish/, which moves
+      # whenever the TFM or RID changes - so search for it instead of spelling it out.
+      - name: Locate the published exe
+        id: exe
+        run: |
+          name="$(sed -n '/<AssemblyName>/{s:.*<AssemblyName>\([^<]*\)</AssemblyName>.*:\1:p;q;}' "$PROJECT")"
+          [ -n "$name" ] || name="$(basename "$PROJECT" .csproj)"
+
+          found=""
+          while IFS= read -r candidate; do
+            if [ -z "$found" ] || [ "$candidate" -nt "$found" ]; then
+              found="$candidate"
+            fi
+          done < <(find "$(dirname "$PROJECT")/bin" -type f -path '*/publish/*' -name "$name.exe" 2>/dev/null)
+
+          if [ -z "$found" ]; then
+            echo "::error::no $name.exe under a publish/ directory - the publish output layout changed"
+            find "$(dirname "$PROJECT")/bin" -type f -name '*.exe' 2>/dev/null || true
+            exit 1
+          fi
+
+          ls -l "$found"
+          echo "path=$found" >> "$GITHUB_OUTPUT"
+          echo "asset=$name.exe" >> "$GITHUB_OUTPUT"
+
+      # gh is preinstalled on the runner, so there is no third-party action to trust.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          ASSET_PATH: ${{ steps.exe.outputs.path }}
+          ASSET_NAME: ${{ steps.exe.outputs.asset }}
+        run: |
+          title="WoW Version Fix v$VERSION (Windows)"
+          notes="**WoW Version Fix v$VERSION** - the Windows app.
+
+          Download: [$ASSET_NAME]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG/$ASSET_NAME)
+
+          Usage: [windows/README.md]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$TAG/windows/README.md)"
+
+          # Without a start tag the changelog runs from whatever released last, which
+          # would be the macOS app half the time. Pin it to the previous Windows tag.
+          prev="$(git tag --list 'windows-v*' --sort=-v:refname | awk -v t="$TAG" 'f {print; exit} $0 == t {f = 1}')"
+          start=()
+          [ -z "$prev" ] || start=(--notes-start-tag "$prev")
+
+          # Windows owns the repo's "Latest" marker: v1.0.0 and its download count are
+          # the Windows app, and /releases/latest must never resolve to the macOS zip.
+          # Create first and fall back on an explicit already_exists, so a 5xx or a rate
+          # limit fails loudly instead of being mistaken for "no release yet".
+          if out="$(gh release create "$TAG" "$ASSET_PATH" \
+               --title "$title" \
+               --notes "$notes" \
+               --generate-notes "${start[@]}" \
+               --latest \
+               --verify-tag 2>&1)"; then
+            printf '%s\n' "$out"
+            exit 0
+          fi
+
+          printf '%s\n' "$out" >&2
+          case "$out" in *already_exists*) ;; *) exit 1 ;; esac
+
+          # Re-run of a tag whose release already exists: refresh the asset AND the
+          # metadata, so a bad first run's title/notes do not stick forever.
+
+          gh release upload "$TAG" "$ASSET_PATH" --clobber
+          gh release edit "$TAG" --title "$title" --notes "$notes" --latest
