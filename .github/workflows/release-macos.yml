@@ -47,7 +47,7 @@ jobs:
 
       # Full history so the previous macos-v* tag can be found for the changelog.
       - name: Checkout the tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.tag.outputs.tag }}
           fetch-depth: 0
