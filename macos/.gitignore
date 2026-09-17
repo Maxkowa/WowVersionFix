@@ -1,0 +1,28 @@
+# Blizzard's own files - never commit these
+/cache/
+/library/
+*.partial/
+*.app/
+
+# Build output
+/build/
+*.dSYM/
+*.o
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Editors
+.vscode/
+.idea/
+*.swp

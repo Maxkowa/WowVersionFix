@@ -1,8 +1,44 @@
+# Blizzard's own downloaded files - never commit these.
+# wowbuild.py always writes to ~/wow-build-fetch, so when this repo is cloned
+# INTO that directory these land at the REPO ROOT, not under macos/.
+# Deliberately un-anchored (no leading slash) so they match at root and at depth.
+cache/
+library/
+*.partial/
+*.app/
+
+# ~/wow-build-fetch also holds a loose copy of the tool. The tracked copy is
+# macos/wowbuild.py, so a root-level one is always a stray - keep it out of git.
+# (Cloning this repo into ~/wow-build-fetch is a bad idea anyway: that folder's
+# own README.md collides with this one. Keep them separate directories.)
+/wowbuild.py
+
+# Build output
 bin/
 obj/
 publish/
-*.user
-*.suo
-.vs/
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+._*
+.AppleDouble
+.Spotlight-V100
+.DocumentRevisions-V100
+.TemporaryItems
+.Trashes
+.fseventsd
+
+# Editors
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+
+# Local scratch
+*.log
