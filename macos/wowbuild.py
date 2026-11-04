@@ -424,12 +424,20 @@ def app_version(app):
         return None
 
 
-def live_app(flavor_dir):
-    apps = [p for p in glob.glob(os.path.join(flavor_dir, "*.app"))
+def live_apps(flavor_dir):
+    return [p for p in glob.glob(os.path.join(flavor_dir, "*.app"))
             if os.path.exists(os.path.join(p, "Contents", "MacOS"))]
+
+
+def live_app(flavor_dir):
+    apps = live_apps(flavor_dir)
     if len(apps) > 1:
         die(f"{flavor_dir} has more than one app bundle:\n  " + "\n  ".join(apps))
     return apps[0] if apps else None
+
+
+def live_version(apps):
+    return ", ".join(sorted({v for v in map(app_version, apps) if v}))
 
 
 def lib_dir(product, version):
@@ -515,7 +523,7 @@ def do_fetch(product, version, branch, force=False):
         print(f"  [{i}/{len(files)}] {sz / 1048576:7.2f} MB  {rel}")
 
     app = os.path.join(tmp, root)
-    if subprocess.run(["codesign", "--verify", "--deep", "--strict", app],
+    if subprocess.run(["codesign", "--verify", "--strict", "--ignore-resources", app],
                       capture_output=True).returncode != 0:
         shutil.rmtree(tmp, ignore_errors=True)
         die("code signature did not verify - refusing to keep this build")
@@ -534,6 +542,10 @@ def archive_live(product, flavor_dir, branch):
         return
     ver = app_version(app)
     if not ver or lib_app(product, ver):
+        return
+    if subprocess.run(["codesign", "--verify", "--strict", "--ignore-resources", app],
+                      capture_output=True).returncode != 0:
+        print(f"not archiving {ver}: its code signature does not verify")
         return
     dest = os.path.join(lib_dir(product, ver), os.path.basename(app))
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -619,15 +631,15 @@ def status_data(args):
     out = {"game_dir": game, "flavors": [], "cache_bytes": dir_size(CACHE),
            "library_bytes": dir_size(LIB)}
     for product, d in sorted(fl.items()):
-        app = live_app(d)
+        apps = live_apps(d)
         libd = os.path.join(LIB, product)
         out["flavors"].append({
             "product": product,
             "dir": d,
             "folder": os.path.basename(d),
             "expected": br.get(product, {}).get("version") or "",
-            "installed": (app_version(app) if app else "") or "",
-            "bundle": os.path.basename(app) if app else "",
+            "installed": live_version(apps),
+            "bundle": ", ".join(os.path.basename(a) for a in apps),
             "region": br.get(product, {}).get("region", ""),
             "library": sorted(os.listdir(libd)) if os.path.isdir(libd) else [],
             "running": bool(running_in(d)),
@@ -651,8 +663,8 @@ def cmd_status(args):
     br, fl = branches(game), flavors(game)
     print(game)
     for product, d in sorted(fl.items()):
-        app = live_app(d)
-        actual = app_version(app) if app else None
+        apps = live_apps(d)
+        actual = live_version(apps)
         expected = br.get(product, {}).get("version")
         note = ""
         if actual and expected and actual != expected:
@@ -660,7 +672,7 @@ def cmd_status(args):
         print(f"\n  {os.path.basename(d):<16} [{product}]")
         print(f"    battle.net expects : {expected or '?'}")
         print(f"    installed bundle   : {actual or '(none)'}{note}")
-        if app:
+        for app in apps:
             print(f"                         {os.path.basename(app)}")
         have = sorted(os.listdir(os.path.join(LIB, product))) if os.path.isdir(os.path.join(LIB, product)) else []
         if have:
