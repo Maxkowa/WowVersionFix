@@ -84,7 +84,7 @@ So it works for `wow`, `wowt`, `wow_classic_era`, `wow_anniversary` without bein
 ## Safety
 
 - Refuses to swap a flavor whose client is running (scoped per flavor, so you can touch PTR while retail is open).
-- Verifies `codesign --verify --deep --strict` before a build downloaded from the CDN enters the library, and refuses to keep one that fails. (The bundle already installed in your game folder is archived as-is when you switch away from it.) Files are Blizzard's own, signed with their Developer ID — nothing is patched or re-signed.
+- Verifies `codesign --verify --strict --ignore-resources` before a build downloaded from the CDN enters the library, and refuses to keep one that fails. The bundle already installed in your game folder goes through the same check when you switch away from it and is not archived if it fails, so `revert` fetches a clean copy instead. Resources are skipped because Blizzard seals `Contents/MacOS/icudt78l.dat` as signed code but ships it unsigned, so a full check fails on current retail builds, Battle.net's own install included. Files are Blizzard's own, signed with their Developer ID — nothing is patched or re-signed.
 - Downloads to a `.partial` directory and only renames into place on success.
 - Before swapping, copies whatever is currently installed into the library, so `revert` never depends on the CDN still hosting that build.
 - Never touches `.build.info`. That file tells the client which CASC config to read out of `Data/`, so leaving it alone is what lets an older binary run against the data already on disk.

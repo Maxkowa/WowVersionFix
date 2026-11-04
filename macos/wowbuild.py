@@ -523,7 +523,7 @@ def do_fetch(product, version, branch, force=False):
         print(f"  [{i}/{len(files)}] {sz / 1048576:7.2f} MB  {rel}")
 
     app = os.path.join(tmp, root)
-    if subprocess.run(["codesign", "--verify", "--deep", "--strict", app],
+    if subprocess.run(["codesign", "--verify", "--strict", "--ignore-resources", app],
                       capture_output=True).returncode != 0:
         shutil.rmtree(tmp, ignore_errors=True)
         die("code signature did not verify - refusing to keep this build")
@@ -542,6 +542,10 @@ def archive_live(product, flavor_dir, branch):
         return
     ver = app_version(app)
     if not ver or lib_app(product, ver):
+        return
+    if subprocess.run(["codesign", "--verify", "--strict", "--ignore-resources", app],
+                      capture_output=True).returncode != 0:
+        print(f"not archiving {ver}: its code signature does not verify")
         return
     dest = os.path.join(lib_dir(product, ver), os.path.basename(app))
     os.makedirs(os.path.dirname(dest), exist_ok=True)
